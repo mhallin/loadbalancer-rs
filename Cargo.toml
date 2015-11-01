@@ -1,0 +1,17 @@
+[package]
+name = "loadbalancer"
+version = "0.1.0"
+authors = ["Magnus Hallin <mhallin@fastmail.com>"]
+license = "MIT"
+description = "TCP loadbalancer"
+
+[dependencies]
+clippy = {version = "0.0.22", optional = true}
+mio = "0.4"
+clap = "1.4"
+log = "0.3"
+env_logger = "0.3"
+
+[features]
+default = []
+dev = ["clippy"]
