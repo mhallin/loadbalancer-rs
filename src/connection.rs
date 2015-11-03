@@ -1,86 +1,88 @@
 use mio::{Token, EventSet, TryRead, TryWrite};
 use mio::tcp::TcpStream;
 
-use messages::{BackendId, FrontendSender};
+use slab::Index;
+
+#[derive(Debug, Copy, Clone)]
+pub enum TokenType {
+    Listener(ListenerToken),
+    Incoming(IncomingToken),
+    Outgoing(OutgoingToken),
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ListenerToken(pub usize);
+
+#[derive(Debug, Copy, Clone)]
+pub struct IncomingToken(pub usize);
+
+#[derive(Debug, Copy, Clone)]
+pub struct OutgoingToken(pub usize);
 
 #[derive(Debug)]
 pub struct Connection {
-    frontend_state: EventSet,
-    frontend_stream: TcpStream,
-    frontend_token: Token,
-    frontend_reply: FrontendSender,
+    incoming_state: EventSet,
+    incoming_stream: TcpStream,
+    incoming_token: IncomingToken,
 
-    backend_state: EventSet,
-    backend_stream: TcpStream,
-    backend_token: Token,
-    backend_id: BackendId,
+    outgoing_state: EventSet,
+    outgoing_stream: TcpStream,
+    outgoing_token: OutgoingToken,
 }
 
 impl Connection {
-    pub fn new(frontend_token: Token,
-               frontend_stream: TcpStream,
-               frontend_reply: FrontendSender,
-               backend_token: Token,
-               backend_stream: TcpStream,
-               backend_id: BackendId)
+    pub fn new(incoming_stream: TcpStream,
+               incoming_token: IncomingToken,
+               outgoing_stream: TcpStream,
+               outgoing_token: OutgoingToken)
                -> Connection {
         Connection {
-            frontend_state: EventSet::none(),
-            frontend_stream: frontend_stream,
-            frontend_token: frontend_token,
-            frontend_reply: frontend_reply,
+            incoming_state: EventSet::none(),
+            incoming_stream: incoming_stream,
+            incoming_token: incoming_token,
 
-            backend_state: EventSet::none(),
-            backend_stream: backend_stream,
-            backend_token: backend_token,
-            backend_id: backend_id,
+            outgoing_state: EventSet::none(),
+            outgoing_stream: outgoing_stream,
+            outgoing_token: outgoing_token,
         }
     }
 
-    pub fn frontend_ready(&mut self, events: EventSet) {
-        self.frontend_state.insert(events);
+    pub fn incoming_ready(&mut self, events: EventSet) {
+        self.incoming_state.insert(events);
     }
 
-    pub fn backend_ready(&mut self, events: EventSet) {
-        self.backend_state.insert(events);
+    pub fn outgoing_ready(&mut self, events: EventSet) {
+        self.outgoing_state.insert(events);
     }
 
-    pub fn is_backend_closed(&self) -> bool {
-        self.backend_state.is_error() || self.backend_state.is_hup()
+    pub fn is_outgoing_closed(&self) -> bool {
+        self.outgoing_state.is_error() || self.outgoing_state.is_hup()
     }
 
-    pub fn is_frontend_closed(&self) -> bool {
-        self.frontend_state.is_error() || self.frontend_state.is_hup()
+    pub fn is_incoming_closed(&self) -> bool {
+        self.incoming_state.is_error() || self.incoming_state.is_hup()
+    }
+
+    pub fn incoming_stream<'a>(&'a self) -> &'a TcpStream {
+        &self.incoming_stream
+    }
+
+    pub fn outgoing_stream<'a>(&'a self) -> &'a TcpStream {
+        &self.outgoing_stream
+    }
+
+    pub fn outgoing_token(&self) -> OutgoingToken {
+        self.outgoing_token
     }
 
     pub fn tick(&mut self) {
-        if self.backend_state.is_writable() && self.frontend_state.is_readable() {
-            transfer(&mut self.frontend_stream, &mut self.backend_stream)
+        if self.outgoing_state.is_writable() && self.incoming_state.is_readable() {
+            transfer(&mut self.incoming_stream, &mut self.outgoing_stream)
         }
 
-        if self.frontend_state.is_writable() && self.backend_state.is_readable() {
-            transfer(&mut self.backend_stream, &mut self.frontend_stream)
+        if self.incoming_state.is_writable() && self.outgoing_state.is_readable() {
+            transfer(&mut self.outgoing_stream, &mut self.incoming_stream)
         }
-    }
-
-    pub fn backend_stream<'a>(&'a self) -> &'a TcpStream {
-        &self.backend_stream
-    }
-
-    pub fn backend_id(&self) -> BackendId {
-        self.backend_id
-    }
-
-    pub fn frontend_token(&self) -> Token {
-        self.frontend_token
-    }
-
-    pub fn frontend_stream(self) -> TcpStream {
-        self.frontend_stream
-    }
-
-    pub fn frontend_reply<'a>(&'a self) -> &'a FrontendSender {
-        &self.frontend_reply
     }
 }
 
@@ -121,4 +123,66 @@ fn transfer_chunk(src: &mut TcpStream, dest: &mut TcpStream) -> bool {
     }
 
     return false;
+}
+
+impl TokenType {
+    pub fn from_raw_token(t: Token) -> TokenType {
+        let i = t.as_usize();
+
+        match i & 3 {
+            0 => TokenType::Listener(ListenerToken(i >> 2)),
+            1 => TokenType::Incoming(IncomingToken(i >> 2)),
+            2 => TokenType::Outgoing(OutgoingToken(i >> 2)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+
+impl ListenerToken {
+    pub fn as_raw_token(self) -> Token {
+        Token(self.0 << 2)
+    }
+}
+
+impl IncomingToken {
+    pub fn as_raw_token(self) -> Token {
+        Token((self.0 << 2) + 1)
+    }
+}
+
+impl OutgoingToken {
+    pub fn as_raw_token(self) -> Token {
+        Token((self.0 << 2) + 2)
+    }
+}
+
+impl Index for ListenerToken {
+    fn from_usize(i: usize) -> ListenerToken {
+        ListenerToken(i)
+    }
+
+    fn as_usize(&self) -> usize {
+        self.0
+    }
+}
+
+impl Index for IncomingToken {
+    fn from_usize(i: usize) -> IncomingToken {
+        IncomingToken(i)
+    }
+
+    fn as_usize(&self) -> usize {
+        self.0
+    }
+}
+
+impl Index for OutgoingToken {
+    fn from_usize(i: usize) -> OutgoingToken {
+        OutgoingToken(i)
+    }
+
+    fn as_usize(&self) -> usize {
+        self.0
+    }
 }

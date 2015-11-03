@@ -4,23 +4,26 @@
 
 extern crate clap;
 extern crate mio;
+extern crate slab;
 
 #[macro_use]
 extern crate log;
 extern crate env_logger;
 
 mod connection;
-mod messages;
 mod frontend;
 mod backend;
+mod driver;
 
 use std::net::{ToSocketAddrs, SocketAddr};
 use std::io::Result as IOResult;
 
 use clap::{Arg, App};
+use mio::EventLoop;
 
 use frontend::Frontend;
 use backend::Backend;
+use driver::Driver;
 
 fn resolve_name(s: &str) -> IOResult<SocketAddr> {
     let addrs: Vec<SocketAddr> = try!(s.to_socket_addrs()).collect();
@@ -83,12 +86,13 @@ fn main() {
     info!("Using listen address: {:?}", listen_addr);
     info!("Using targets: {:?}", target_addrs);
 
-    let backend = Backend::new(target_addrs[0]).unwrap();
-    let frontend = Frontend::new(&listen_addr, backend.channel()).unwrap();
+    let backend = Backend::new(target_addrs);
+    let frontend = Frontend::new(listen_addr, vec![backend]);
+    let mut driver = Driver::new();
+    let mut event_loop = EventLoop::new().unwrap();
 
-    let backend_thread = backend.run();
-    let frontend_therad = frontend.run();
+    driver.register(&mut event_loop, frontend).unwrap();
 
-    backend_thread.join().unwrap();
-    frontend_therad.join().unwrap();
+    trace!("Starting event loop");
+    event_loop.run(&mut driver).unwrap();
 }
