@@ -44,7 +44,7 @@ impl Driver {
                                      Error::new(ErrorKind::Other, "Listener buffer full")
                                  }));
 
-            try!(event_loop.register_opt(&self.listeners[token].listener,
+            try!(event_loop.register_opt(&self.listeners.get(token).unwrap().listener,
                                          token.as_raw_token(),
                                          EventSet::readable(),
                                          PollOpt::edge()));
@@ -61,60 +61,62 @@ impl Driver {
                       events: EventSet) {
         assert!(events.is_readable());
 
-        info!("Accepting connection");
+        if let Some(listener) = self.listeners.get(token) {
+            info!("Accepting connection");
 
-        let listener = &self.listeners[token];
+            let incoming = match listener.listener.accept() {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    warn!("Accept would block");
+                    return;
+                }
+                Err(e) => {
+                    error!("Accept error: {}", e);
+                    return;
+                }
+            };
 
-        let incoming = match listener.listener.accept() {
-            Ok(Some(client)) => client,
-            Ok(None) => {
-                warn!("Accept would block");
-                return;
-            }
-            Err(e) => {
-                error!("Accept error: {}", e);
-                return;
-            }
-        };
+            let backend = listener.frontend.decide_backend();
+            let target = backend.borrow_mut().decide_target();
 
-        let backend = listener.frontend.decide_backend();
-        let target = backend.borrow_mut().decide_target();
+            let outgoing = match TcpStream::connect(&target) {
+                Ok(client) => client,
+                Err(e) => {
+                    error!("Connect error: {}", e);
+                    return;
+                }
+            };
 
-        let outgoing = match TcpStream::connect(&target) {
-            Ok(client) => client,
-            Err(e) => {
-                error!("Connect error: {}", e);
-                return;
-            }
-        };
+            let outgoing_token = self.outgoing_connections
+                                     .insert(None)
+                                     .expect("Outgoing buffer full");
 
-        let outgoing_token = self.outgoing_connections
-                                 .insert(None)
-                                 .expect("Outgoing buffer full");
+            let incoming_token = self.incoming_connections
+                                     .insert_with(|incoming_token| {
+                                         Connection::new(incoming,
+                                                         incoming_token,
+                                                         outgoing,
+                                                         outgoing_token)
+                                     })
+                                     .expect("Incoming buffer full");
 
-        let incoming_token = self.incoming_connections
-                                 .insert_with(|incoming_token| {
-                                     Connection::new(incoming,
-                                                     incoming_token,
-                                                     outgoing,
-                                                     outgoing_token)
-                                 })
-                                 .expect("Incoming buffer full");
+            self.outgoing_connections[outgoing_token] = Some(incoming_token);
 
-        self.outgoing_connections[outgoing_token] = Some(incoming_token);
+            let connection = self.incoming_connections.get(incoming_token).unwrap();
 
-        let connection = &self.incoming_connections[incoming_token];
-
-        event_loop.register_opt(connection.incoming_stream(),
-                                incoming_token.as_raw_token(),
-                                EventSet::all(),
-                                PollOpt::edge())
-                  .unwrap();
-        event_loop.register_opt(connection.outgoing_stream(),
-                                outgoing_token.as_raw_token(),
-                                EventSet::all(),
-                                PollOpt::edge())
-                  .unwrap();
+            event_loop.register_opt(connection.incoming_stream(),
+                                    incoming_token.as_raw_token(),
+                                    EventSet::all(),
+                                    PollOpt::edge())
+                      .unwrap();
+            event_loop.register_opt(connection.outgoing_stream(),
+                                    outgoing_token.as_raw_token(),
+                                    EventSet::all(),
+                                    PollOpt::edge())
+                      .unwrap();
+        } else {
+            error!("Listener event on unknown token");
+        }
     }
 
     fn incoming_ready(&mut self,
@@ -123,9 +125,7 @@ impl Driver {
                       events: EventSet) {
         let mut remove = false;
 
-        {
-            let mut connection = &mut self.incoming_connections[token];
-
+        if let Some(mut connection) = self.incoming_connections.get_mut(token) {
             connection.incoming_ready(events);
             connection.tick();
 
@@ -143,24 +143,21 @@ impl Driver {
                       event_loop: &mut EventLoop,
                       token: OutgoingToken,
                       events: EventSet) {
-        let incoming_token = self.outgoing_connections[token]
-                                 .expect("Event on unknown outgoing token");
+        if let Some(&Some(incoming_token)) = self.outgoing_connections.get(token) {
+            let mut remove = false;
 
-        let mut remove = false;
+            if let Some(mut connection) = self.incoming_connections.get_mut(incoming_token) {
+                connection.outgoing_ready(events);
+                connection.tick();
 
-        {
-            let mut connection = &mut self.incoming_connections[incoming_token];
-
-            connection.outgoing_ready(events);
-            connection.tick();
-
-            if connection.is_outgoing_closed() {
-                remove = true;
+                if connection.is_outgoing_closed() {
+                    remove = true;
+                }
             }
-        }
 
-        if remove {
-            self.remove_connection(event_loop, incoming_token);
+            if remove {
+                self.remove_connection(event_loop, incoming_token);
+            }
         }
     }
 
