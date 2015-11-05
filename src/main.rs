@@ -5,22 +5,29 @@
 extern crate clap;
 extern crate mio;
 extern crate slab;
+extern crate toml;
+extern crate rustc_serialize;
 
 #[macro_use]
 extern crate log;
 extern crate env_logger;
 
+mod config;
 mod connection;
 mod frontend;
 mod backend;
 mod driver;
 
 use std::net::{ToSocketAddrs, SocketAddr};
-use std::io::Result as IOResult;
+use std::io::{ErrorKind, Result as IOResult, Error as IOError};
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use clap::{Arg, App};
 use mio::EventLoop;
 
+use config::{RootConfig, FrontendConfig, BackendConfig};
 use frontend::Frontend;
 use backend::Backend;
 use driver::Driver;
@@ -33,6 +40,34 @@ fn resolve_name(s: &str) -> IOResult<SocketAddr> {
     Ok(addrs[0])
 }
 
+fn make_backend(config: &BackendConfig) -> IOResult<Rc<RefCell<Backend>>> {
+    let target_addrs = config.target_addrs
+                             .iter()
+                             .flat_map(|s| {
+                                 match resolve_name(s) {
+                                     Ok(a) => Ok(a),
+                                     Err(e) => {
+                                         println!("Could not resolve TARGET argument {}: {}", s, e);
+                                         Err(e)
+                                     }
+                                 }
+                             })
+                             .collect::<Vec<SocketAddr>>();
+
+    if target_addrs.len() != config.target_addrs.len() {
+        Err(IOError::new(ErrorKind::NotFound, "Could not resolve target address"))
+    } else {
+        Ok(Backend::new(target_addrs))
+    }
+}
+
+fn make_frontend(config: &FrontendConfig,
+                 backends: &HashMap<&String, Rc<RefCell<Backend>>>)
+                 -> IOResult<Rc<Frontend>> {
+    Ok(Frontend::new(try!(resolve_name(&config.listen_addr)),
+                     vec![backends[&config.backend].clone()]))
+}
+
 fn main() {
     env_logger::init().unwrap();
 
@@ -40,59 +75,39 @@ fn main() {
                       .version(env!("CARGO_PKG_VERSION"))
                       .author("Magnus Hallin <mhallin@fastmail.com>")
                       .about("TCP load balancer")
-                      .arg(Arg::with_name("LISTEN")
+                      .arg(Arg::with_name("CONFIG")
+                               .short("c")
+                               .long("config")
                                .help("Listen address of the load balancer")
                                .required(true)
-                               .index(1))
-                      .arg(Arg::with_name("TARGET")
-                               .help("Target adresses")
-                               .required(true)
-                               .index(2)
-                               .multiple(true))
+                               .takes_value(true))
                       .get_matches();
 
-    let listen_addr = match resolve_name(matches.value_of("LISTEN")
-                                                .expect("Must provide LISTEN argument")) {
-        Ok(l) => l,
-        Err(e) => {
-            println!("Could not resolve LISTEN argument: {}", e);
-            return;
-        }
-    };
+    let config_path = matches.value_of("CONFIG").expect("Config parameter must be set");
 
-    let target_names = matches.values_of("TARGET")
-                              .expect("Must provide one or more TARGET arguments");
-    let num_targets = target_names.len();
+    let config = RootConfig::read_config(&config_path).unwrap();
 
-    let target_addrs: Vec<SocketAddr> = target_names.into_iter()
-                                                    .flat_map(|s| {
-                                                        match resolve_name(s) {
-                                                            Ok(a) => Some(a),
-                                                            Err(e) => {
-                                                                println!("Could not resolve \
-                                                                          TARGET argument {}: {}",
-                                                                         s,
-                                                                         e);
-                                                                None
-                                                            }
-                                                        }
-                                                    })
-                                                    .collect();
+    debug!("Using config: {:#?}", config);
 
-    if num_targets != target_addrs.len() {
-        return;
+    let mut backends = HashMap::new();
+    let mut frontends = HashMap::new();
+
+    for (name, config) in config.backends.iter() {
+        backends.insert(name, make_backend(config).unwrap());
     }
 
-    info!("Using listen address: {:?}", listen_addr);
-    info!("Using targets: {:?}", target_addrs);
+    for (name, config) in config.frontends.iter() {
+        frontends.insert(name, make_frontend(config, &backends).unwrap());
+    }
 
-    let backend = Backend::new(target_addrs);
-    let frontend = Frontend::new(listen_addr, vec![backend]);
     let mut driver = Driver::new();
     let mut event_loop = EventLoop::new().unwrap();
 
-    driver.register(&mut event_loop, frontend).unwrap();
+    for (_, frontend) in frontends.into_iter() {
+        driver.register(&mut event_loop, frontend).unwrap();
+    }
 
-    trace!("Starting event loop");
-    event_loop.run(&mut driver).unwrap();
+    info!("Starting event loop");
+
+    event_loop.run(&mut driver).unwrap()
 }

@@ -1,0 +1,6 @@
+[frontends.http_in]
+listen_addr = "0.0.0.0:3000"
+backend = "http_out"
+
+[backends.http_out]
+target_addrs = ["127.0.0.1:8000", "127.0.0.1:8001"]

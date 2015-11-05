@@ -12,6 +12,8 @@ clap = "1.4"
 log = "0.3"
 env_logger = "0.3"
 slab = "0.1"
+toml = "0.1"
+rustc-serialize = "0.3"
 
 [features]
 default = []
