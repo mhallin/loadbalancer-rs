@@ -3,7 +3,7 @@ name = "loadbalancer"
 version = "0.1.0"
 authors = ["Magnus Hallin <mhallin@fastmail.com>"]
 license = "MIT"
-description = "TCP loadbalancer"
+description = "TCP load balancer"
 
 [dependencies]
 clippy = {version = "0.0.22", optional = true}
