@@ -219,14 +219,14 @@ mod test {
 
     use env_logger;
 
-    use ::frontend::Frontend;
-    use ::backend::Backend;
+    use frontend::Frontend;
+    use backend::Backend;
 
     static PORT_NUMBER: AtomicUsize = ATOMIC_USIZE_INIT;
 
     fn next_port() -> u16 {
         let first_port = option_env!("TEST_BASE_PORT")
-            .map_or(32328, |v| v.parse::<usize>().unwrap());
+                             .map_or(32328, |v| v.parse::<usize>().unwrap());
         PORT_NUMBER.compare_and_swap(0, first_port, Ordering::SeqCst);
 
         PORT_NUMBER.fetch_add(1, Ordering::SeqCst) as u16
