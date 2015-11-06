@@ -205,3 +205,116 @@ impl Handler for Driver {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::{EventLoop, Driver, DriverMessage};
+
+    use std::thread;
+    use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+    use std::net::{TcpStream, TcpListener, SocketAddr};
+    use std::str::FromStr;
+    use std::io::{Write, BufReader, BufRead};
+    use std::time::Duration;
+
+    use env_logger;
+
+    use ::frontend::Frontend;
+    use ::backend::Backend;
+
+    static PORT_NUMBER: AtomicUsize = ATOMIC_USIZE_INIT;
+
+    fn next_port() -> u16 {
+        let first_port = option_env!("TEST_BASE_PORT")
+            .map_or(32328, |v| v.parse::<usize>().unwrap());
+        PORT_NUMBER.compare_and_swap(0, first_port, Ordering::SeqCst);
+
+        PORT_NUMBER.fetch_add(1, Ordering::SeqCst) as u16
+    }
+
+    fn listen_addr() -> SocketAddr {
+        let addr = format!("127.0.0.1:{}", next_port());
+        FromStr::from_str(&addr).unwrap()
+    }
+
+    #[test]
+    fn start_stop_driver() {
+        let mut event_loop = EventLoop::new().unwrap();
+        let sender = event_loop.channel();
+
+        let t = thread::spawn(move || {
+            let mut driver = Driver::new();
+            event_loop.run(&mut driver).unwrap();
+        });
+
+        sender.send(DriverMessage::Shutdown).unwrap();
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn single_backend() {
+        env_logger::init().unwrap();
+
+        let mut event_loop = EventLoop::new().unwrap();
+        let sender = event_loop.channel();
+        let frontend_addr = listen_addr();
+        let backend_addr = listen_addr();
+
+        let t1 = thread::spawn(move || {
+            let mut driver = Driver::new();
+            let backend = Backend::new(vec![backend_addr]);
+            let frontend = Frontend::new(frontend_addr, vec![backend]);
+
+            driver.register(&mut event_loop, frontend).unwrap();
+            debug!("Starting event loop");
+
+            event_loop.run(&mut driver).unwrap();
+        });
+
+        let t2 = thread::spawn(move || {
+            debug!("Starting backend listener");
+
+            let listener = TcpListener::bind(backend_addr).unwrap();
+            let (mut client, _) = listener.accept().unwrap();
+
+            write!(client, "sent by backend\n").unwrap();
+            client.flush().unwrap();
+
+            debug!("Backend wrote data, waiting for data now");
+
+            let mut reader = BufReader::new(client);
+            let mut buffer = String::new();
+            reader.read_line(&mut buffer).unwrap();
+
+            debug!("Backend done");
+
+            assert_eq!(buffer, "sent by frontend\n");
+        });
+
+        thread::sleep(Duration::from_millis(100));
+
+        {
+            debug!("Connecting to frontend...");
+            let client = TcpStream::connect(frontend_addr).unwrap();
+            debug!("Frontend connected, waiting for data...");
+
+            let mut reader = BufReader::new(client);
+            let mut buffer = String::new();
+            reader.read_line(&mut buffer).unwrap();
+
+            debug!("Frontend read data, sending response");
+
+            assert_eq!(buffer, "sent by backend\n");
+
+            write!(reader.get_mut(), "sent by frontend\n").unwrap();
+            reader.get_mut().flush().unwrap();
+
+            debug!("Frontend done");
+        }
+
+        sender.send(DriverMessage::Shutdown).unwrap();
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+    }
+}
