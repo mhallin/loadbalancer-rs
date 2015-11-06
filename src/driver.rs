@@ -18,6 +18,10 @@ pub struct Driver {
     listeners: Slab<Listener, ListenerToken>,
 }
 
+pub enum DriverMessage {
+    Shutdown,
+}
+
 struct Listener {
     listener: TcpListener,
     frontend: Rc<Frontend>,
@@ -178,7 +182,7 @@ impl Driver {
 
 impl Handler for Driver {
     type Timeout = ();
-    type Message = ();
+    type Message = DriverMessage;
 
     fn ready(&mut self, event_loop: &mut EventLoop, token: Token, events: EventSet) {
         if token == Token(0) {
@@ -192,6 +196,12 @@ impl Handler for Driver {
             TokenType::Listener(token) => self.listener_ready(event_loop, token, events),
             TokenType::Incoming(token) => self.incoming_ready(event_loop, token, events),
             TokenType::Outgoing(token) => self.outgoing_ready(event_loop, token, events),
+        }
+    }
+
+    fn notify(&mut self, event_loop: &mut EventLoop, msg: DriverMessage) {
+        match msg {
+            DriverMessage::Shutdown => event_loop.shutdown(),
         }
     }
 }
