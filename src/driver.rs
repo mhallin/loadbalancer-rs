@@ -1,13 +1,10 @@
-use std::io::{Result, Error, ErrorKind};
-use std::rc::Rc;
-
 use mio;
 use mio::{Token, Handler, EventSet, PollOpt};
-use mio::tcp::{TcpStream, TcpListener};
+use mio::tcp::TcpStream;
 
-use frontend::Frontend;
+use config::RootConfig;
 use connection::{TokenType, ListenerToken, IncomingToken, OutgoingToken, Connection};
-use driver_state::{DriverState, Listener};
+use driver_state::DriverState;
 
 type EventLoop = mio::EventLoop<Driver>;
 
@@ -17,36 +14,12 @@ pub struct Driver {
 
 pub enum DriverMessage {
     Shutdown,
+    Reconfigure(RootConfig),
 }
 
 impl Driver {
     pub fn new(state: DriverState) -> Driver {
-        Driver {
-            state: state,
-        }
-    }
-
-    pub fn register(&mut self, event_loop: &mut EventLoop, frontend: Rc<Frontend>) -> Result<()> {
-        for listen_addr in frontend.listen_addrs() {
-            let listener = try!(TcpListener::bind(&listen_addr));
-            let token = try!(self.state.listeners
-                                 .insert(Listener {
-                                     listener: listener,
-                                     frontend: frontend.clone(),
-                                 })
-                                 .map_err(|_| {
-                                     Error::new(ErrorKind::Other, "Listener buffer full")
-                                 }));
-
-            try!(event_loop.register_opt(&self.state.listeners.get(token).unwrap().listener,
-                                         token.as_raw_token(),
-                                         EventSet::readable(),
-                                         PollOpt::edge()));
-
-            debug!("Added listener or {:?}", listen_addr);
-        }
-
-        Ok(())
+        Driver { state: state }
     }
 
     fn listener_ready(&mut self,
@@ -81,11 +54,13 @@ impl Driver {
                 }
             };
 
-            let outgoing_token = self.state.outgoing_connections
+            let outgoing_token = self.state
+                                     .outgoing_connections
                                      .insert(None)
                                      .expect("Outgoing buffer full");
 
-            let incoming_token = self.state.incoming_connections
+            let incoming_token = self.state
+                                     .incoming_connections
                                      .insert_with(|incoming_token| {
                                          Connection::new(incoming,
                                                          incoming_token,
@@ -156,10 +131,12 @@ impl Driver {
     }
 
     fn remove_connection(&mut self, event_loop: &mut EventLoop, token: IncomingToken) {
-        let connection = self.state.incoming_connections
+        let connection = self.state
+                             .incoming_connections
                              .remove(token)
                              .expect("Can't remove already removed incoming connection");
-        self.state.outgoing_connections
+        self.state
+            .outgoing_connections
             .remove(connection.outgoing_token())
             .expect("Can't remove already removed outgoing connection");
 
@@ -192,6 +169,8 @@ impl Handler for Driver {
     fn notify(&mut self, event_loop: &mut EventLoop, msg: DriverMessage) {
         match msg {
             DriverMessage::Shutdown => event_loop.shutdown(),
+            DriverMessage::Reconfigure(config) =>
+                self.state.reconfigure(event_loop, config).unwrap(),
         }
     }
 }
@@ -206,11 +185,11 @@ mod test {
     use std::str::FromStr;
     use std::io::{Write, BufReader, BufRead};
     use std::time::Duration;
+    use std::collections::HashMap;
 
     use env_logger;
 
-    use frontend::Frontend;
-    use backend::Backend;
+    use config::RootConfig;
     use driver_state::DriverState;
 
     static PORT_NUMBER: AtomicUsize = ATOMIC_USIZE_INIT;
@@ -221,11 +200,6 @@ mod test {
         PORT_NUMBER.compare_and_swap(0, first_port, Ordering::SeqCst);
 
         PORT_NUMBER.fetch_add(1, Ordering::SeqCst) as u16
-    }
-
-    fn listen_addr() -> SocketAddr {
-        let addr = format!("127.0.0.1:{}", next_port());
-        FromStr::from_str(&addr).unwrap()
     }
 
     #[test]
@@ -248,15 +222,31 @@ mod test {
 
         let mut event_loop = EventLoop::new().unwrap();
         let sender = event_loop.channel();
-        let frontend_addr = listen_addr();
-        let backend_addr = listen_addr();
+
+        let config = RootConfig::from_str(&format!("[frontends.in]
+listen_addr = \
+                                                    \"127.0.0.1:{}\"
+backend = \"out\"
+
+\
+                                                    [backends.out]
+target_addrs = \
+                                                    [\"127.0.0.1:{}\"]
+",
+                                                   next_port(),
+                                                   next_port()))
+                         .unwrap();
+
+        let backend_addr: SocketAddr = FromStr::from_str(&config.backends["out"].target_addrs[0])
+                                           .unwrap();
+        let frontend_addr: SocketAddr = FromStr::from_str(&config.frontends["in"].listen_addr)
+                                            .unwrap();
 
         let t1 = thread::spawn(move || {
-            let mut driver = Driver::new(DriverState::new());
-            let backend = Backend::new(vec![backend_addr]);
-            let frontend = Frontend::new(frontend_addr, vec![backend]);
+            let mut driver_state = DriverState::new();
+            driver_state.reconfigure(&mut event_loop, config).unwrap();
+            let mut driver = Driver::new(driver_state);
 
-            driver.register(&mut event_loop, frontend).unwrap();
             debug!("Starting event loop");
 
             event_loop.run(&mut driver).unwrap();
@@ -307,5 +297,64 @@ mod test {
 
         t1.join().unwrap();
         t2.join().unwrap();
+    }
+
+    #[test]
+    fn test_reconfigure_remove_listen() {
+        let mut event_loop = EventLoop::new().unwrap();
+        let sender = event_loop.channel();
+
+        let config = RootConfig::from_str(&format!("[frontends.in]
+listen_addr = \
+                                                    \"127.0.0.1:{}\"
+backend = \"out\"
+
+\
+                                                    [backends.out]
+target_addrs = \
+                                                    [\"127.0.0.1:{}\"]
+",
+                                                   next_port(),
+                                                   next_port()))
+                         .unwrap();
+
+        let frontend_addr: SocketAddr = FromStr::from_str(&config.frontends["in"].listen_addr)
+                                            .unwrap();
+
+        let t1 = thread::spawn(move || {
+            let mut driver_state = DriverState::new();
+            driver_state.reconfigure(&mut event_loop, config).unwrap();
+            let mut driver = Driver::new(driver_state);
+
+            debug!("Starting event loop");
+
+            event_loop.run(&mut driver).unwrap();
+        });
+
+        thread::sleep(Duration::from_millis(100));
+
+        {
+            let client = TcpStream::connect(frontend_addr);
+
+            assert!(client.is_ok());
+        }
+
+        sender.send(DriverMessage::Reconfigure(RootConfig {
+                  frontends: HashMap::new(),
+                  backends: HashMap::new(),
+              }))
+              .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+
+        {
+            let client = TcpStream::connect(frontend_addr);
+
+            assert!(client.is_err());
+        }
+
+        sender.send(DriverMessage::Shutdown).unwrap();
+
+        t1.join().unwrap();
     }
 }

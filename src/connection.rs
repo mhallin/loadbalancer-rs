@@ -10,13 +10,13 @@ pub enum TokenType {
     Outgoing(OutgoingToken),
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub struct ListenerToken(pub usize);
 
-#[derive(Debug, Copy, Clone)]
+#[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub struct IncomingToken(pub usize);
 
-#[derive(Debug, Copy, Clone)]
+#[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub struct OutgoingToken(pub usize);
 
 #[derive(Debug)]

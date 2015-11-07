@@ -31,18 +31,22 @@ pub enum ReadError {
 }
 
 impl RootConfig {
-    pub fn read_config(filename: &str) -> Result<RootConfig, ReadError> {
-        let mut contents = String::new();
-        let mut file = try!(File::open(filename));
-        try!(file.read_to_string(&mut contents));
-
-        let mut parser = toml::Parser::new(&contents);
+    pub fn from_str(config: &str) -> Result<RootConfig, ReadError> {
+        let mut parser = toml::Parser::new(&config);
         let table = try!(parser.parse().ok_or(parser.errors.clone()));
         let mut decoder = toml::Decoder::new(toml::Value::Table(table));
 
         let config = try!(RootConfig::decode(&mut decoder));
 
         Ok(config)
+    }
+
+    pub fn read_config(filename: &str) -> Result<RootConfig, ReadError> {
+        let mut contents = String::new();
+        let mut file = try!(File::open(filename));
+        try!(file.read_to_string(&mut contents));
+
+        RootConfig::from_str(&contents)
     }
 }
 
