@@ -4,3 +4,8 @@ backend = "http_out"
 
 [backends.http_out]
 target_addrs = ["127.0.0.1:8000", "127.0.0.1:8001"]
+
+
+[buffers]
+connections = 4096
+listeners = 128

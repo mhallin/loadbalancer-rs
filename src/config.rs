@@ -2,25 +2,33 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Error as IOError};
 use std::result::Result;
+use std::default::Default;
 
 use rustc_serialize::Decodable;
 use toml;
 
-#[derive(Debug, RustcDecodable)]
+#[derive(Debug, RustcDecodable, Default)]
 pub struct RootConfig {
     pub frontends: HashMap<String, FrontendConfig>,
     pub backends: HashMap<String, BackendConfig>,
+    pub buffers: BufferConfig,
 }
 
-#[derive(Debug, RustcDecodable)]
+#[derive(Debug, RustcDecodable, Default)]
 pub struct FrontendConfig {
     pub listen_addr: String,
     pub backend: String,
 }
 
-#[derive(Debug, RustcDecodable)]
+#[derive(Debug, RustcDecodable, Default)]
 pub struct BackendConfig {
     pub target_addrs: Vec<String>,
+}
+
+#[derive(Debug, RustcDecodable)]
+pub struct BufferConfig {
+    pub connections: usize,
+    pub listeners: usize,
 }
 
 #[derive(Debug)]
@@ -65,5 +73,14 @@ impl From<toml::DecodeError> for ReadError {
 impl From<Vec<toml::ParserError>> for ReadError {
     fn from(e: Vec<toml::ParserError>) -> ReadError {
         ReadError::ParseError(e)
+    }
+}
+
+impl Default for BufferConfig {
+    fn default() -> Self {
+        BufferConfig {
+            connections: 4096,
+            listeners: 128,
+        }
     }
 }

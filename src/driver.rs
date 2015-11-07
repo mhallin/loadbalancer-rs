@@ -186,6 +186,7 @@ mod test {
     use std::io::{Write, BufReader, BufRead};
     use std::time::Duration;
     use std::collections::HashMap;
+    use std::default::Default;
 
     use env_logger;
 
@@ -208,7 +209,7 @@ mod test {
         let sender = event_loop.channel();
 
         let t = thread::spawn(move || {
-            let mut driver = Driver::new(DriverState::new());
+            let mut driver = Driver::new(DriverState::new(&Default::default()));
             event_loop.run(&mut driver).unwrap();
         });
 
@@ -232,6 +233,11 @@ backend = \"out\"
                                                     [backends.out]
 target_addrs = \
                                                     [\"127.0.0.1:{}\"]
+
+[buffers]
+connections = \
+                                                    4096
+listeners = 128
 ",
                                                    next_port(),
                                                    next_port()))
@@ -243,7 +249,7 @@ target_addrs = \
                                             .unwrap();
 
         let t1 = thread::spawn(move || {
-            let mut driver_state = DriverState::new();
+            let mut driver_state = DriverState::new(&Default::default());
             driver_state.reconfigure(&mut event_loop, config).unwrap();
             let mut driver = Driver::new(driver_state);
 
@@ -313,6 +319,11 @@ backend = \"out\"
                                                     [backends.out]
 target_addrs = \
                                                     [\"127.0.0.1:{}\"]
+
+[buffers]
+connections = \
+                                                    4096
+listeners = 128
 ",
                                                    next_port(),
                                                    next_port()))
@@ -322,7 +333,7 @@ target_addrs = \
                                             .unwrap();
 
         let t1 = thread::spawn(move || {
-            let mut driver_state = DriverState::new();
+            let mut driver_state = DriverState::new(&Default::default());
             driver_state.reconfigure(&mut event_loop, config).unwrap();
             let mut driver = Driver::new(driver_state);
 
@@ -342,6 +353,7 @@ target_addrs = \
         sender.send(DriverMessage::Reconfigure(RootConfig {
                   frontends: HashMap::new(),
                   backends: HashMap::new(),
+                  ..Default::default()
               }))
               .unwrap();
 

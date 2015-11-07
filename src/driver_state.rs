@@ -13,7 +13,7 @@ use slab::Slab;
 use backend::Backend;
 use frontend::Frontend;
 use connection::{ListenerToken, IncomingToken, OutgoingToken, Connection};
-use config::{RootConfig, BackendConfig, FrontendConfig};
+use config::{RootConfig, BackendConfig, FrontendConfig, BufferConfig};
 
 pub struct Listener {
     pub listener: TcpListener,
@@ -29,11 +29,11 @@ pub struct DriverState {
 }
 
 impl DriverState {
-    pub fn new() -> DriverState {
+    pub fn new(buffers: &BufferConfig) -> DriverState {
         DriverState {
-            incoming_connections: Slab::new_starting_at(IncomingToken(1), 4096),
-            outgoing_connections: Slab::new_starting_at(OutgoingToken(1), 4096),
-            listeners: Slab::new_starting_at(ListenerToken(1), 128),
+            incoming_connections: Slab::new_starting_at(IncomingToken(1), buffers.connections),
+            outgoing_connections: Slab::new_starting_at(OutgoingToken(1), buffers.connections),
+            listeners: Slab::new_starting_at(ListenerToken(1), buffers.listeners),
         }
     }
 
