@@ -16,6 +16,7 @@ mod config;
 mod connection;
 mod frontend;
 mod backend;
+mod driver_state;
 mod driver;
 
 use std::net::{ToSocketAddrs, SocketAddr};
@@ -30,6 +31,7 @@ use mio::EventLoop;
 use config::{RootConfig, FrontendConfig, BackendConfig};
 use frontend::Frontend;
 use backend::Backend;
+use driver_state::DriverState;
 use driver::Driver;
 
 fn resolve_name(s: &str) -> IOResult<SocketAddr> {
@@ -100,7 +102,7 @@ fn main() {
         frontends.insert(name, make_frontend(config, &backends).unwrap());
     }
 
-    let mut driver = Driver::new();
+    let mut driver = Driver::new(DriverState::new());
     let mut event_loop = EventLoop::new().unwrap();
 
     for (_, frontend) in frontends.into_iter() {

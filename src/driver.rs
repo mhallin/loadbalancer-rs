@@ -5,41 +5,31 @@ use mio;
 use mio::{Token, Handler, EventSet, PollOpt};
 use mio::tcp::{TcpStream, TcpListener};
 
-use slab::Slab;
-
 use frontend::Frontend;
 use connection::{TokenType, ListenerToken, IncomingToken, OutgoingToken, Connection};
+use driver_state::{DriverState, Listener};
 
 type EventLoop = mio::EventLoop<Driver>;
 
 pub struct Driver {
-    incoming_connections: Slab<Connection, IncomingToken>,
-    outgoing_connections: Slab<Option<IncomingToken>, OutgoingToken>,
-    listeners: Slab<Listener, ListenerToken>,
+    state: DriverState,
 }
 
 pub enum DriverMessage {
     Shutdown,
 }
 
-struct Listener {
-    listener: TcpListener,
-    frontend: Rc<Frontend>,
-}
-
 impl Driver {
-    pub fn new() -> Driver {
+    pub fn new(state: DriverState) -> Driver {
         Driver {
-            incoming_connections: Slab::new_starting_at(IncomingToken(1), 4096),
-            outgoing_connections: Slab::new_starting_at(OutgoingToken(1), 4096),
-            listeners: Slab::new_starting_at(ListenerToken(1), 128),
+            state: state,
         }
     }
 
     pub fn register(&mut self, event_loop: &mut EventLoop, frontend: Rc<Frontend>) -> Result<()> {
         for listen_addr in frontend.listen_addrs() {
             let listener = try!(TcpListener::bind(&listen_addr));
-            let token = try!(self.listeners
+            let token = try!(self.state.listeners
                                  .insert(Listener {
                                      listener: listener,
                                      frontend: frontend.clone(),
@@ -48,7 +38,7 @@ impl Driver {
                                      Error::new(ErrorKind::Other, "Listener buffer full")
                                  }));
 
-            try!(event_loop.register_opt(&self.listeners.get(token).unwrap().listener,
+            try!(event_loop.register_opt(&self.state.listeners.get(token).unwrap().listener,
                                          token.as_raw_token(),
                                          EventSet::readable(),
                                          PollOpt::edge()));
@@ -65,7 +55,7 @@ impl Driver {
                       events: EventSet) {
         assert!(events.is_readable());
 
-        if let Some(listener) = self.listeners.get(token) {
+        if let Some(listener) = self.state.listeners.get(token) {
             info!("Accepting connection");
 
             let incoming = match listener.listener.accept() {
@@ -91,11 +81,11 @@ impl Driver {
                 }
             };
 
-            let outgoing_token = self.outgoing_connections
+            let outgoing_token = self.state.outgoing_connections
                                      .insert(None)
                                      .expect("Outgoing buffer full");
 
-            let incoming_token = self.incoming_connections
+            let incoming_token = self.state.incoming_connections
                                      .insert_with(|incoming_token| {
                                          Connection::new(incoming,
                                                          incoming_token,
@@ -104,9 +94,9 @@ impl Driver {
                                      })
                                      .expect("Incoming buffer full");
 
-            self.outgoing_connections[outgoing_token] = Some(incoming_token);
+            self.state.outgoing_connections[outgoing_token] = Some(incoming_token);
 
-            let connection = self.incoming_connections.get(incoming_token).unwrap();
+            let connection = self.state.incoming_connections.get(incoming_token).unwrap();
 
             event_loop.register_opt(connection.incoming_stream(),
                                     incoming_token.as_raw_token(),
@@ -129,7 +119,7 @@ impl Driver {
                       events: EventSet) {
         let mut remove = false;
 
-        if let Some(mut connection) = self.incoming_connections.get_mut(token) {
+        if let Some(mut connection) = self.state.incoming_connections.get_mut(token) {
             connection.incoming_ready(events);
             connection.tick();
 
@@ -147,10 +137,10 @@ impl Driver {
                       event_loop: &mut EventLoop,
                       token: OutgoingToken,
                       events: EventSet) {
-        if let Some(&Some(incoming_token)) = self.outgoing_connections.get(token) {
+        if let Some(&Some(incoming_token)) = self.state.outgoing_connections.get(token) {
             let mut remove = false;
 
-            if let Some(mut connection) = self.incoming_connections.get_mut(incoming_token) {
+            if let Some(mut connection) = self.state.incoming_connections.get_mut(incoming_token) {
                 connection.outgoing_ready(events);
                 connection.tick();
 
@@ -166,10 +156,10 @@ impl Driver {
     }
 
     fn remove_connection(&mut self, event_loop: &mut EventLoop, token: IncomingToken) {
-        let connection = self.incoming_connections
+        let connection = self.state.incoming_connections
                              .remove(token)
                              .expect("Can't remove already removed incoming connection");
-        self.outgoing_connections
+        self.state.outgoing_connections
             .remove(connection.outgoing_token())
             .expect("Can't remove already removed outgoing connection");
 
@@ -221,6 +211,7 @@ mod test {
 
     use frontend::Frontend;
     use backend::Backend;
+    use driver_state::DriverState;
 
     static PORT_NUMBER: AtomicUsize = ATOMIC_USIZE_INIT;
 
@@ -243,7 +234,7 @@ mod test {
         let sender = event_loop.channel();
 
         let t = thread::spawn(move || {
-            let mut driver = Driver::new();
+            let mut driver = Driver::new(DriverState::new());
             event_loop.run(&mut driver).unwrap();
         });
 
@@ -261,7 +252,7 @@ mod test {
         let backend_addr = listen_addr();
 
         let t1 = thread::spawn(move || {
-            let mut driver = Driver::new();
+            let mut driver = Driver::new(DriverState::new());
             let backend = Backend::new(vec![backend_addr]);
             let frontend = Frontend::new(frontend_addr, vec![backend]);
 
