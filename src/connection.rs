@@ -19,15 +19,22 @@ pub struct IncomingToken(pub usize);
 #[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub struct OutgoingToken(pub usize);
 
-#[derive(Debug)]
+type BufferArray = [u8; 4096];
+
 pub struct Connection {
     incoming_state: EventSet,
     incoming_stream: TcpStream,
     incoming_token: IncomingToken,
+    incoming_buffer: BufferArray,
+    incoming_buffer_size: usize,
+    incoming_total_transfer: usize,
 
     outgoing_state: EventSet,
     outgoing_stream: TcpStream,
     outgoing_token: OutgoingToken,
+    outgoing_buffer: BufferArray,
+    outgoing_buffer_size: usize,
+    outgoing_total_transfer: usize,
 }
 
 impl Connection {
@@ -40,10 +47,16 @@ impl Connection {
             incoming_state: EventSet::none(),
             incoming_stream: incoming_stream,
             incoming_token: incoming_token,
+            incoming_buffer: [0; 4096],
+            incoming_buffer_size: 4096,
+            incoming_total_transfer: 0,
 
             outgoing_state: EventSet::none(),
             outgoing_stream: outgoing_stream,
             outgoing_token: outgoing_token,
+            outgoing_buffer: [0; 4096],
+            outgoing_buffer_size: 4096,
+            outgoing_total_transfer: 0,
         }
     }
 
@@ -75,36 +88,114 @@ impl Connection {
         self.outgoing_token
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> bool {
+        trace!("Connection in state [incoming {:?}] [outgoing {:?}]",
+               self.incoming_state,
+               self.outgoing_state);
+
+        let mut data_sent = false;
+        let mut could_send = false;
+
+        if self.incoming_buffer.len() != self.incoming_buffer_size &&
+           self.outgoing_state.is_writable() {
+            could_send = true;
+            data_sent |= flush_buffer(&mut self.incoming_buffer,
+                                      &mut self.incoming_buffer_size,
+                                      &mut self.outgoing_stream,
+                                      &mut self.outgoing_total_transfer);
+            self.outgoing_state.remove(EventSet::writable());
+        }
+
+        if self.outgoing_buffer.len() != self.outgoing_buffer_size &&
+           self.incoming_state.is_writable() {
+            could_send = true;
+            data_sent |= flush_buffer(&mut self.outgoing_buffer,
+                                      &mut self.outgoing_buffer_size,
+                                      &mut self.incoming_stream,
+                                      &mut self.incoming_total_transfer);
+            self.incoming_state.remove(EventSet::writable());
+        }
+
         if self.outgoing_state.is_writable() && self.incoming_state.is_readable() {
-            transfer(&mut self.incoming_stream, &mut self.outgoing_stream)
+            could_send = true;
+            data_sent |= transfer(&mut self.incoming_buffer,
+                                  &mut self.incoming_buffer_size,
+                                  &mut self.incoming_stream,
+                                  &mut self.outgoing_stream,
+                                  &mut self.outgoing_total_transfer);
+            self.incoming_state.remove(EventSet::readable());
+            self.outgoing_state.remove(EventSet::writable());
         }
 
         if self.incoming_state.is_writable() && self.outgoing_state.is_readable() {
-            transfer(&mut self.outgoing_stream, &mut self.incoming_stream)
+            could_send = true;
+            data_sent |= transfer(&mut self.outgoing_buffer,
+                                  &mut self.outgoing_buffer_size,
+                                  &mut self.outgoing_stream,
+                                  &mut self.incoming_stream,
+                                  &mut self.incoming_total_transfer);
+            self.incoming_state.remove(EventSet::writable());
+            self.outgoing_state.remove(EventSet::readable());
+        }
+
+        !could_send || data_sent
+    }
+}
+
+fn flush_buffer(buf: &BufferArray,
+                buf_size: &mut usize,
+                dest: &mut TcpStream,
+                total: &mut usize)
+                -> bool {
+    let start_index = *buf_size;
+    let bytes_to_write = buf.len() - start_index;
+
+    trace!("Will flush {} bytes", bytes_to_write);
+
+    match dest.try_write(&buf[start_index..]) {
+        Ok(Some(n_written)) => {
+            *total += n_written;
+            trace!("Flushed {} bytes, total {}", n_written, *total);
+
+            assert!(bytes_to_write == n_written, "Must flush entire buffer");
+
+            *buf_size = buf.len();
+
+            return n_written > 0;
+        }
+        Ok(None) => {
+            trace!("Writing would block");
+        }
+        Err(e) => {
+            error!("Writing caused error: {}", e);
         }
     }
+
+    return false;
 }
 
-fn transfer(src: &mut TcpStream, dest: &mut TcpStream) {
-    while transfer_chunk(src, dest) {
-    }
-}
-
-fn transfer_chunk(src: &mut TcpStream, dest: &mut TcpStream) -> bool {
-    let mut buf = [0u8; 4096];
-
-    match src.try_read(&mut buf) {
+fn transfer(buf: &mut BufferArray,
+            buf_size: &mut usize,
+            src: &mut TcpStream,
+            dest: &mut TcpStream,
+            total: &mut usize)
+            -> bool {
+    match src.try_read(buf) {
         Ok(Some(n_read)) => {
             trace!("Read {} bytes", n_read);
 
             match dest.try_write(&buf[0..n_read]) {
                 Ok(Some(n_written)) => {
-                    trace!("Wrote {} bytes", n_written);
+                    *total += n_written;
+                    trace!("Wrote {} bytes, total {}", n_written, *total);
 
-                    if n_written == buf.len() {
-                        return true;
+                    if n_written < n_read {
+                        *buf_size = buf.len() - (n_read - n_written);
+                    } else {
+                        *buf_size = buf.len();
                     }
+
+                    return n_written > 0;
                 }
                 Ok(None) => {
                     trace!("Writing would block");

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use mio;
 use mio::{Token, Handler, EventSet, PollOpt};
 use mio::tcp::TcpStream;
@@ -10,6 +12,7 @@ type EventLoop = mio::EventLoop<Driver>;
 
 pub struct Driver {
     state: DriverState,
+    to_reregister: HashSet<IncomingToken>,
 }
 
 pub enum DriverMessage {
@@ -19,7 +22,10 @@ pub enum DriverMessage {
 
 impl Driver {
     pub fn new(state: DriverState) -> Driver {
-        Driver { state: state }
+        Driver {
+            state: state,
+            to_reregister: HashSet::new(),
+        }
     }
 
     fn listener_ready(&mut self,
@@ -76,61 +82,77 @@ impl Driver {
             event_loop.register_opt(connection.incoming_stream(),
                                     incoming_token.as_raw_token(),
                                     EventSet::all(),
-                                    PollOpt::edge())
+                                    PollOpt::edge() | PollOpt::oneshot())
                       .unwrap();
             event_loop.register_opt(connection.outgoing_stream(),
                                     outgoing_token.as_raw_token(),
                                     EventSet::all(),
-                                    PollOpt::edge())
+                                    PollOpt::edge() | PollOpt::oneshot())
+                      .unwrap();
+
+            event_loop.reregister(&listener.listener,
+                                  token.as_raw_token(),
+                                  EventSet::readable(),
+                                  PollOpt::edge() | PollOpt::oneshot())
                       .unwrap();
         } else {
-            error!("Listener event on unknown token");
+            error!("Listener event on unknown token {:?}", token);
         }
     }
 
-    fn incoming_ready(&mut self,
-                      event_loop: &mut EventLoop,
-                      token: IncomingToken,
-                      events: EventSet) {
+    fn incoming_ready(&mut self, token: IncomingToken, events: EventSet) {
         let mut remove = false;
 
         if let Some(mut connection) = self.state.incoming_connections.get_mut(token) {
             connection.incoming_ready(events);
-            connection.tick();
+            let data_sent = connection.tick();
 
-            if connection.is_incoming_closed() {
+            if !data_sent && (connection.is_incoming_closed() || connection.is_outgoing_closed()) {
                 remove = true;
+            } else {
+                self.to_reregister.insert(token);
             }
+        } else {
+            warn!("Could not find incoming connection for {:?}", token);
         }
 
         if remove {
-            self.remove_connection(event_loop, token);
+            self.remove_connection(token);
         }
     }
 
-    fn outgoing_ready(&mut self,
-                      event_loop: &mut EventLoop,
-                      token: OutgoingToken,
-                      events: EventSet) {
+    fn outgoing_ready(&mut self, token: OutgoingToken, events: EventSet) {
         if let Some(&Some(incoming_token)) = self.state.outgoing_connections.get(token) {
             let mut remove = false;
 
             if let Some(mut connection) = self.state.incoming_connections.get_mut(incoming_token) {
                 connection.outgoing_ready(events);
-                connection.tick();
+                let data_sent = connection.tick();
 
-                if connection.is_outgoing_closed() {
+                if !data_sent && connection.is_outgoing_closed() {
                     remove = true;
+                } else {
+                    self.to_reregister.insert(incoming_token);
                 }
+            } else {
+                warn!("Could not find corresponding incoming connection for {:?} -> {:?}",
+                      token,
+                      incoming_token);
             }
 
             if remove {
-                self.remove_connection(event_loop, incoming_token);
+                debug!("Clearing connection from {:?} -> {:?}",
+                       token,
+                       incoming_token);
+                self.state.outgoing_connections[token] = None
             }
+        } else {
+            warn!("Could not find outgoing connection for {:?}", token);
         }
     }
 
-    fn remove_connection(&mut self, event_loop: &mut EventLoop, token: IncomingToken) {
+    fn remove_connection(&mut self, token: IncomingToken) {
+        debug!("Removing connection on incoming token {:?}", token);
         let connection = self.state
                              .incoming_connections
                              .remove(token)
@@ -139,11 +161,6 @@ impl Driver {
             .outgoing_connections
             .remove(connection.outgoing_token())
             .expect("Can't remove already removed outgoing connection");
-
-        event_loop.deregister(connection.incoming_stream())
-                  .expect("Can't deregister already deregistered incoming stream");
-        event_loop.deregister(connection.outgoing_stream())
-                  .expect("Can't deregister already deregistered outgoing stream");
     }
 }
 
@@ -153,16 +170,16 @@ impl Handler for Driver {
 
     fn ready(&mut self, event_loop: &mut EventLoop, token: Token, events: EventSet) {
         if token == Token(0) {
-            trace!("Event on token zero");
+            warn!("Should not receive events on Token zero");
             return;
         }
 
-        trace!("Event on token {:?}", token);
+        trace!("Events on token {:?}: {:?}", token, events);
 
         match TokenType::from_raw_token(token) {
             TokenType::Listener(token) => self.listener_ready(event_loop, token, events),
-            TokenType::Incoming(token) => self.incoming_ready(event_loop, token, events),
-            TokenType::Outgoing(token) => self.outgoing_ready(event_loop, token, events),
+            TokenType::Incoming(token) => self.incoming_ready(token, events),
+            TokenType::Outgoing(token) => self.outgoing_ready(token, events),
         }
     }
 
@@ -172,6 +189,40 @@ impl Handler for Driver {
             DriverMessage::Reconfigure(config) =>
                 self.state.reconfigure(event_loop, config).unwrap(),
         }
+    }
+
+    fn tick(&mut self, event_loop: &mut EventLoop) {
+        for token in self.to_reregister.iter() {
+            if let Some(connection) = self.state.incoming_connections.get(*token) {
+                event_loop.reregister(connection.incoming_stream(),
+                                      token.as_raw_token(),
+                                      EventSet::all(),
+                                      PollOpt::edge() | PollOpt::oneshot())
+                          .unwrap();
+
+                event_loop.reregister(connection.outgoing_stream(),
+                                      connection.outgoing_token().as_raw_token(),
+                                      EventSet::all(),
+                                      PollOpt::edge() | PollOpt::oneshot())
+                          .unwrap();
+            }
+        }
+
+        self.to_reregister.clear();
+
+        for token in self.state.listeners_to_remove.iter() {
+            info!("Removing listener on token {:?}", token);
+
+            let listener = self.state
+                               .listeners
+                               .remove(*token)
+                               .unwrap();
+
+            event_loop.deregister(&listener.listener).unwrap();
+            drop(listener);
+        }
+
+        self.state.listeners_to_remove.clear();
     }
 }
 
@@ -205,6 +256,8 @@ mod test {
 
     #[test]
     fn start_stop_driver() {
+        env_logger::init().unwrap_or(());
+
         let mut event_loop = EventLoop::new().unwrap();
         let sender = event_loop.channel();
 
@@ -219,7 +272,7 @@ mod test {
 
     #[test]
     fn single_backend() {
-        env_logger::init().unwrap();
+        env_logger::init().unwrap_or(());
 
         let mut event_loop = EventLoop::new().unwrap();
         let sender = event_loop.channel();
@@ -307,6 +360,8 @@ listeners = 128
 
     #[test]
     fn test_reconfigure_remove_listen() {
+        env_logger::init().unwrap_or(());
+
         let mut event_loop = EventLoop::new().unwrap();
         let sender = event_loop.channel();
 
@@ -355,18 +410,19 @@ listeners = 128
                   backends: HashMap::new(),
                   ..Default::default()
               }))
-              .unwrap();
+              .expect("Should be able to send reconfigure message");
 
         thread::sleep(Duration::from_millis(100));
 
         {
+            debug!("Trying to connect, expecting refused connection");
             let client = TcpStream::connect(frontend_addr);
 
             assert!(client.is_err());
         }
 
-        sender.send(DriverMessage::Shutdown).unwrap();
+        sender.send(DriverMessage::Shutdown).expect("Should be able to send shutdown message");
 
-        t1.join().unwrap();
+        t1.join().expect("Event loop thread should have exited cleanly");
     }
 }

@@ -26,6 +26,7 @@ pub struct DriverState {
     pub incoming_connections: Slab<Connection, IncomingToken>,
     pub outgoing_connections: Slab<Option<IncomingToken>, OutgoingToken>,
     pub listeners: Slab<Listener, ListenerToken>,
+    pub listeners_to_remove: HashSet<ListenerToken>,
 }
 
 impl DriverState {
@@ -34,6 +35,7 @@ impl DriverState {
             incoming_connections: Slab::new_starting_at(IncomingToken(1), buffers.connections),
             outgoing_connections: Slab::new_starting_at(OutgoingToken(1), buffers.connections),
             listeners: Slab::new_starting_at(ListenerToken(1), buffers.listeners),
+            listeners_to_remove: HashSet::new(),
         }
     }
 
@@ -43,7 +45,7 @@ impl DriverState {
                           -> IOResult<()>
         where T: Handler
     {
-        trace!("Reconfiguring driver state: {:#?}", config);
+        info!("Reconfiguring driver state: {:#?}", config);
 
         let mut backends = HashMap::new();
         let mut frontends = HashMap::new();
@@ -57,7 +59,6 @@ impl DriverState {
         }
 
         let mut listeners_to_add: HashMap<SocketAddr, Rc<Frontend>> = HashMap::new();
-        let mut listeners_to_remove: HashSet<ListenerToken> = HashSet::new();
 
         {
             let mut listeners_by_addr = self.listeners
@@ -80,7 +81,7 @@ impl DriverState {
             }
 
             for (_, listener) in listeners_by_addr.into_iter() {
-                listeners_to_remove.insert(listener.token);
+                self.listeners_to_remove.insert(listener.token);
             }
         }
 
@@ -98,19 +99,12 @@ impl DriverState {
                                  .ok_or(IOError::new(ErrorKind::Other, "Listener buffer full")));
             let listener = &self.listeners[token];
 
+            info!("Added listener with token {:?}", token);
+
             try!(event_loop.register_opt(&listener.listener,
                                          listener.token.as_raw_token(),
                                          EventSet::readable(),
-                                         PollOpt::edge()));
-        }
-
-        for token in listeners_to_remove.into_iter() {
-            let listener = try!(self.listeners
-                                    .remove(token)
-                                    .ok_or(IOError::new(ErrorKind::Other,
-                                                        "Could not remove listener")));
-
-            try!(event_loop.deregister(&listener.listener));
+                                         PollOpt::edge() | PollOpt::oneshot()));
         }
 
         Ok(())
