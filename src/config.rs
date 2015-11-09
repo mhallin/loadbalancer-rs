@@ -7,25 +7,25 @@ use std::default::Default;
 use rustc_serialize::Decodable;
 use toml;
 
-#[derive(Debug, RustcDecodable, Default)]
+#[derive(Debug, RustcDecodable, Default, Clone)]
 pub struct RootConfig {
     pub frontends: HashMap<String, FrontendConfig>,
     pub backends: HashMap<String, BackendConfig>,
     pub buffers: BufferConfig,
 }
 
-#[derive(Debug, RustcDecodable, Default)]
+#[derive(Debug, RustcDecodable, Default, Clone)]
 pub struct FrontendConfig {
     pub listen_addr: String,
     pub backend: String,
 }
 
-#[derive(Debug, RustcDecodable, Default)]
+#[derive(Debug, RustcDecodable, Default, Clone)]
 pub struct BackendConfig {
     pub target_addrs: Vec<String>,
 }
 
-#[derive(Debug, RustcDecodable)]
+#[derive(Debug, RustcDecodable, Clone)]
 pub struct BufferConfig {
     pub connections: usize,
     pub listeners: usize,

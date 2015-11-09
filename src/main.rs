@@ -50,7 +50,7 @@ fn main() {
     let mut event_loop = EventLoop::new().unwrap();
 
     let mut driver_state = DriverState::new(&config.buffers);
-    driver_state.reconfigure(&mut event_loop, config).unwrap();
+    driver_state.reconfigure(&mut event_loop, &config).unwrap();
 
     let mut driver = Driver::new(driver_state);
 

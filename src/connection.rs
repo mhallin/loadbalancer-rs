@@ -24,7 +24,6 @@ type BufferArray = [u8; 4096];
 pub struct Connection {
     incoming_state: EventSet,
     incoming_stream: TcpStream,
-    incoming_token: IncomingToken,
     incoming_buffer: BufferArray,
     incoming_buffer_size: usize,
     incoming_total_transfer: usize,
@@ -39,14 +38,12 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(incoming_stream: TcpStream,
-               incoming_token: IncomingToken,
                outgoing_stream: TcpStream,
                outgoing_token: OutgoingToken)
                -> Connection {
         Connection {
             incoming_state: EventSet::none(),
             incoming_stream: incoming_stream,
-            incoming_token: incoming_token,
             incoming_buffer: [0; 4096],
             incoming_buffer_size: 4096,
             incoming_total_transfer: 0,

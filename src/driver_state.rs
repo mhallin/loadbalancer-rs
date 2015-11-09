@@ -12,7 +12,7 @@ use slab::Slab;
 
 use backend::Backend;
 use frontend::Frontend;
-use connection::{ListenerToken, IncomingToken, OutgoingToken, Connection};
+use connection::ListenerToken;
 use config::{RootConfig, BackendConfig, FrontendConfig, BufferConfig};
 
 pub struct Listener {
@@ -23,25 +23,23 @@ pub struct Listener {
 }
 
 pub struct DriverState {
-    pub incoming_connections: Slab<Connection, IncomingToken>,
-    pub outgoing_connections: Slab<Option<IncomingToken>, OutgoingToken>,
     pub listeners: Slab<Listener, ListenerToken>,
     pub listeners_to_remove: HashSet<ListenerToken>,
+    pub config: RootConfig,
 }
 
 impl DriverState {
     pub fn new(buffers: &BufferConfig) -> DriverState {
         DriverState {
-            incoming_connections: Slab::new_starting_at(IncomingToken(1), buffers.connections),
-            outgoing_connections: Slab::new_starting_at(OutgoingToken(1), buffers.connections),
             listeners: Slab::new_starting_at(ListenerToken(1), buffers.listeners),
             listeners_to_remove: HashSet::new(),
+            config: RootConfig { buffers: (*buffers).clone(), ..Default::default() },
         }
     }
 
     pub fn reconfigure<T>(&mut self,
                           event_loop: &mut EventLoop<T>,
-                          config: RootConfig)
+                          config: &RootConfig)
                           -> IOResult<()>
         where T: Handler
     {
@@ -106,6 +104,8 @@ impl DriverState {
                                          EventSet::readable(),
                                          PollOpt::edge() | PollOpt::oneshot()));
         }
+
+        self.config = (*config).clone();
 
         Ok(())
     }

@@ -4,6 +4,8 @@ use mio;
 use mio::{Token, Handler, EventSet, PollOpt};
 use mio::tcp::TcpStream;
 
+use slab::Slab;
+
 use config::RootConfig;
 use connection::{TokenType, ListenerToken, IncomingToken, OutgoingToken, Connection};
 use driver_state::DriverState;
@@ -11,8 +13,10 @@ use driver_state::DriverState;
 type EventLoop = mio::EventLoop<Driver>;
 
 pub struct Driver {
-    state: DriverState,
     to_reregister: HashSet<IncomingToken>,
+    incoming_connections: Slab<Connection, IncomingToken>,
+    outgoing_connections: Slab<Option<IncomingToken>, OutgoingToken>,
+    state: DriverState,
 }
 
 pub enum DriverMessage {
@@ -23,8 +27,12 @@ pub enum DriverMessage {
 impl Driver {
     pub fn new(state: DriverState) -> Driver {
         Driver {
-            state: state,
             to_reregister: HashSet::new(),
+            incoming_connections: Slab::new_starting_at(IncomingToken(1),
+                                                        state.config.buffers.connections),
+            outgoing_connections: Slab::new_starting_at(OutgoingToken(1),
+                                                        state.config.buffers.connections),
+            state: state,
         }
     }
 
@@ -60,24 +68,18 @@ impl Driver {
                 }
             };
 
-            let outgoing_token = self.state
-                                     .outgoing_connections
+            let outgoing_token = self.outgoing_connections
                                      .insert(None)
                                      .expect("Outgoing buffer full");
 
-            let incoming_token = self.state
-                                     .incoming_connections
-                                     .insert_with(|incoming_token| {
-                                         Connection::new(incoming,
-                                                         incoming_token,
-                                                         outgoing,
-                                                         outgoing_token)
-                                     })
-                                     .expect("Incoming buffer full");
+            let incoming_token = self.incoming_connections
+                                     .insert(Connection::new(incoming, outgoing, outgoing_token))
+                                     .map_err(|_| "Incoming buffer full")
+                                     .unwrap();
 
-            self.state.outgoing_connections[outgoing_token] = Some(incoming_token);
+            self.outgoing_connections[outgoing_token] = Some(incoming_token);
 
-            let connection = self.state.incoming_connections.get(incoming_token).unwrap();
+            let connection = self.incoming_connections.get(incoming_token).unwrap();
 
             event_loop.register_opt(connection.incoming_stream(),
                                     incoming_token.as_raw_token(),
@@ -103,7 +105,7 @@ impl Driver {
     fn incoming_ready(&mut self, token: IncomingToken, events: EventSet) {
         let mut remove = false;
 
-        if let Some(mut connection) = self.state.incoming_connections.get_mut(token) {
+        if let Some(mut connection) = self.incoming_connections.get_mut(token) {
             connection.incoming_ready(events);
             let data_sent = connection.tick();
 
@@ -122,10 +124,10 @@ impl Driver {
     }
 
     fn outgoing_ready(&mut self, token: OutgoingToken, events: EventSet) {
-        if let Some(&Some(incoming_token)) = self.state.outgoing_connections.get(token) {
+        if let Some(&Some(incoming_token)) = self.outgoing_connections.get(token) {
             let mut remove = false;
 
-            if let Some(mut connection) = self.state.incoming_connections.get_mut(incoming_token) {
+            if let Some(mut connection) = self.incoming_connections.get_mut(incoming_token) {
                 connection.outgoing_ready(events);
                 let data_sent = connection.tick();
 
@@ -144,7 +146,7 @@ impl Driver {
                 debug!("Clearing connection from {:?} -> {:?}",
                        token,
                        incoming_token);
-                self.state.outgoing_connections[token] = None
+                self.outgoing_connections[token] = None
             }
         } else {
             warn!("Could not find outgoing connection for {:?}", token);
@@ -153,12 +155,10 @@ impl Driver {
 
     fn remove_connection(&mut self, token: IncomingToken) {
         debug!("Removing connection on incoming token {:?}", token);
-        let connection = self.state
-                             .incoming_connections
+        let connection = self.incoming_connections
                              .remove(token)
                              .expect("Can't remove already removed incoming connection");
-        self.state
-            .outgoing_connections
+        self.outgoing_connections
             .remove(connection.outgoing_token())
             .expect("Can't remove already removed outgoing connection");
     }
@@ -187,13 +187,13 @@ impl Handler for Driver {
         match msg {
             DriverMessage::Shutdown => event_loop.shutdown(),
             DriverMessage::Reconfigure(config) =>
-                self.state.reconfigure(event_loop, config).unwrap(),
+                self.state.reconfigure(event_loop, &config).unwrap(),
         }
     }
 
     fn tick(&mut self, event_loop: &mut EventLoop) {
         for token in self.to_reregister.iter() {
-            if let Some(connection) = self.state.incoming_connections.get(*token) {
+            if let Some(connection) = self.incoming_connections.get(*token) {
                 event_loop.reregister(connection.incoming_stream(),
                                       token.as_raw_token(),
                                       EventSet::all(),
@@ -303,7 +303,7 @@ listeners = 128
 
         let t1 = thread::spawn(move || {
             let mut driver_state = DriverState::new(&Default::default());
-            driver_state.reconfigure(&mut event_loop, config).unwrap();
+            driver_state.reconfigure(&mut event_loop, &config).unwrap();
             let mut driver = Driver::new(driver_state);
 
             debug!("Starting event loop");
@@ -389,7 +389,7 @@ listeners = 128
 
         let t1 = thread::spawn(move || {
             let mut driver_state = DriverState::new(&Default::default());
-            driver_state.reconfigure(&mut event_loop, config).unwrap();
+            driver_state.reconfigure(&mut event_loop, &config).unwrap();
             let mut driver = Driver::new(driver_state);
 
             debug!("Starting event loop");
