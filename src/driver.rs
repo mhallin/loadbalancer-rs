@@ -203,51 +203,51 @@ impl Driver {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::{EventLoop, Driver, DriverMessage};
-
-    use std::thread;
-    use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
-    use std::net::{TcpStream, TcpListener, SocketAddr};
-    use std::str::FromStr;
-    use std::io::{Write, BufReader, BufRead};
-    use std::time::Duration;
-    use std::collections::HashMap;
-    use std::default::Default;
-
-    use env_logger;
-
-    use config::RootConfig;
-    use driver_state::DriverState;
-
-    static PORT_NUMBER: AtomicUsize = ATOMIC_USIZE_INIT;
-
-    fn next_port() -> u16 {
-        let first_port =
-            option_env!("TEST_BASE_PORT").map_or(32328, |v| v.parse::<usize>().unwrap());
-        PORT_NUMBER.compare_and_swap(0, first_port, Ordering::SeqCst);
-
-        PORT_NUMBER.fetch_add(1, Ordering::SeqCst) as u16
-    }
-
-    #[test]
-    fn start_stop_driver() {
-        env_logger::init().unwrap_or(());
-
-        let mut event_loop = EventLoop::new().unwrap();
-        let sender = event_loop.channel();
-
-        let t = thread::spawn(move || {
-                                  let mut driver =
-                                      Driver::new(DriverState::new(&Default::default()));
-                                  event_loop.run(&mut driver).unwrap();
-                              });
-
-        sender.send(DriverMessage::Shutdown).unwrap();
-        t.join().unwrap();
-    }
-}
+//#[cfg(test)]
+//mod test {
+//    use super::{EventLoop, Driver, DriverMessage};
+//
+//    use std::thread;
+//    use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+//    use std::net::{TcpStream, TcpListener, SocketAddr};
+//    use std::str::FromStr;
+//    use std::io::{Write, BufReader, BufRead};
+//    use std::time::Duration;
+//    use std::collections::HashMap;
+//    use std::default::Default;
+//
+//    use env_logger;
+//
+//    use config::RootConfig;
+//    use driver_state::DriverState;
+//
+//    static PORT_NUMBER: AtomicUsize = ATOMIC_USIZE_INIT;
+//
+//    fn next_port() -> u16 {
+//        let first_port =
+//            option_env!("TEST_BASE_PORT").map_or(32328, |v| v.parse::<usize>().unwrap());
+//        PORT_NUMBER.compare_and_swap(0, first_port, Ordering::SeqCst);
+//
+//        PORT_NUMBER.fetch_add(1, Ordering::SeqCst) as u16
+//    }
+//
+//    #[test]
+//    fn start_stop_driver() {
+//        env_logger::init().unwrap_or(());
+//
+//        let mut event_loop = EventLoop::new().unwrap();
+//        let sender = event_loop.channel();
+//
+//        let t = thread::spawn(move || {
+//                                  let mut driver =
+//                                      Driver::new(DriverState::new(&Default::default()));
+//                                  event_loop.run(&mut driver).unwrap();
+//                              });
+//
+//        sender.send(DriverMessage::Shutdown).unwrap();
+//        t.join().unwrap();
+//    }
+//}
 //
 //    #[test]
 //    fn single_backend() {
