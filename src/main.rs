@@ -20,7 +20,7 @@ mod driver_state;
 mod driver;
 
 use clap::{Arg, App};
-use mio::EventLoop;
+use mio::{Events, Poll};
 
 use config::RootConfig;
 use driver_state::DriverState;
@@ -30,31 +30,34 @@ fn main() {
     env_logger::init().unwrap();
 
     let matches = App::new("loadbalancer")
-                      .version(env!("CARGO_PKG_VERSION"))
-                      .author("Magnus Hallin <mhallin@fastmail.com>")
-                      .about("TCP load balancer")
-                      .arg(Arg::with_name("CONFIG")
-                               .short("c")
-                               .long("config")
-                               .help("Listen address of the load balancer")
-                               .required(true)
-                               .takes_value(true))
-                      .get_matches();
+        .version(env!("CARGO_PKG_VERSION"))
+        .author("Magnus Hallin <mhallin@fastmail.com>")
+        .about("TCP load balancer")
+        .arg(Arg::with_name("CONFIG")
+                 .short("c")
+                 .long("config")
+                 .help("Listen address of the load balancer")
+                 .required(true)
+                 .takes_value(true))
+        .get_matches();
 
-    let config_path = matches.value_of("CONFIG").expect("Config parameter must be set");
+    let config_path = matches
+        .value_of("CONFIG")
+        .expect("Config parameter must be set");
 
+    let mut poll = Poll::new().expect("Failed to create Poll");
     let config = RootConfig::read_config(&config_path).unwrap();
 
     debug!("Using config: {:#?}", config);
 
-    let mut event_loop = EventLoop::new().unwrap();
+    let mut events = Events::with_capacity(4096);
 
     let mut driver_state = DriverState::new(&config.buffers);
-    driver_state.reconfigure(&mut event_loop, &config).unwrap();
+    driver_state.reconfigure(&mut poll, &config).unwrap();
 
     let mut driver = Driver::new(driver_state);
 
     info!("Starting event loop");
 
-    event_loop.run(&mut driver).unwrap()
+    driver.run(&mut poll, &mut events);
 }

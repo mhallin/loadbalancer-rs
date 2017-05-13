@@ -7,7 +7,7 @@ description = "TCP load balancer"
 
 [dependencies]
 clippy = {version = "0.0.22", optional = true}
-mio = "0.4"
+mio = "0.6.7"
 clap = "1.4"
 log = "0.3"
 env_logger = "0.3"

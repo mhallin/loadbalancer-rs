@@ -10,9 +10,9 @@ pub struct Backend {
 impl Backend {
     pub fn new(targets: Vec<SocketAddr>) -> Rc<RefCell<Backend>> {
         Rc::new(RefCell::new(Backend {
-            targets: targets,
-            next_target: 0,
-        }))
+                                 targets: targets,
+                                 next_target: 0,
+                             }))
     }
 
     pub fn decide_target(&mut self) -> SocketAddr {

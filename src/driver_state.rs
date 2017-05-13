@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::io::{ErrorKind, Result as IOResult, Error as IOError};
 
-use mio::{PollOpt, EventSet, Handler, EventLoop};
+use mio::{Ready, Poll, PollOpt};
 use mio::tcp::TcpListener;
 
 use slab::Slab;
@@ -33,16 +33,14 @@ impl DriverState {
         DriverState {
             listeners: Slab::new_starting_at(ListenerToken(1), buffers.listeners),
             listeners_to_remove: HashSet::new(),
-            config: RootConfig { buffers: (*buffers).clone(), ..Default::default() },
+            config: RootConfig {
+                buffers: (*buffers).clone(),
+                ..Default::default()
+            },
         }
     }
 
-    pub fn reconfigure<T>(&mut self,
-                          event_loop: &mut EventLoop<T>,
-                          config: &RootConfig)
-                          -> IOResult<()>
-        where T: Handler
-    {
+    pub fn reconfigure(&mut self, poll: &mut Poll, config: &RootConfig) -> IOResult<()> {
         info!("Reconfiguring driver state: {:#?}", config);
 
         let mut backends = HashMap::new();
@@ -60,9 +58,9 @@ impl DriverState {
 
         {
             let mut listeners_by_addr = self.listeners
-                                            .iter_mut()
-                                            .map(|l| (l.listen_addr, l))
-                                            .collect::<HashMap<SocketAddr, &mut Listener>>();
+                .iter_mut()
+                .map(|l| (l.listen_addr, l))
+                .collect::<HashMap<SocketAddr, &mut Listener>>();
 
             for (_, frontend) in frontends {
                 for listen_addr in frontend.listen_addrs() {
@@ -87,22 +85,23 @@ impl DriverState {
             let tcp_listener = try!(TcpListener::bind(&addr));
             let token = try!(self.listeners
                                  .insert_with(|token| {
-                                     Listener {
-                                         listener: tcp_listener,
-                                         listen_addr: addr,
-                                         token: token,
-                                         frontend: frontend,
-                                     }
-                                 })
-                                 .ok_or(IOError::new(ErrorKind::Other, "Listener buffer full")));
+                                                  Listener {
+                                                      listener: tcp_listener,
+                                                      listen_addr: addr,
+                                                      token: token,
+                                                      frontend: frontend,
+                                                  }
+                                              })
+                                 .ok_or(IOError::new(ErrorKind::Other,
+                                                     "Listener buffer full")));
             let listener = &self.listeners[token];
 
             info!("Added listener with token {:?}", token);
 
-            try!(event_loop.register_opt(&listener.listener,
-                                         listener.token.as_raw_token(),
-                                         EventSet::readable(),
-                                         PollOpt::edge() | PollOpt::oneshot()));
+            try!(poll.register(&listener.listener,
+                               listener.token.as_raw_token(),
+                               Ready::readable(),
+                               PollOpt::edge() | PollOpt::oneshot()));
         }
 
         self.config = (*config).clone();
@@ -120,18 +119,17 @@ fn resolve_name(s: &str) -> IOResult<SocketAddr> {
 }
 
 fn make_backend(config: &BackendConfig) -> IOResult<Rc<RefCell<Backend>>> {
-    let target_addrs = config.target_addrs
-                             .iter()
-                             .flat_map(|s| {
-                                 match resolve_name(s) {
-                                     Ok(a) => Ok(a),
-                                     Err(e) => {
-                                         println!("Could not resolve TARGET argument {}: {}", s, e);
-                                         Err(e)
-                                     }
-                                 }
-                             })
-                             .collect::<Vec<SocketAddr>>();
+    let target_addrs = config
+        .target_addrs
+        .iter()
+        .flat_map(|s| match resolve_name(s) {
+                      Ok(a) => Ok(a),
+                      Err(e) => {
+            println!("Could not resolve TARGET argument {}: {}", s, e);
+            Err(e)
+        }
+                  })
+        .collect::<Vec<SocketAddr>>();
 
     if target_addrs.len() != config.target_addrs.len() {
         Err(IOError::new(ErrorKind::NotFound, "Could not resolve target address"))
