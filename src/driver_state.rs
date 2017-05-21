@@ -59,7 +59,10 @@ impl DriverState {
         {
             let mut listeners_by_addr = self.listeners
                 .iter_mut()
-                .map(|l| (l.listen_addr, l))
+                .map(|l| {
+                         println!("in listeners iter");
+                         (l.listen_addr, l)
+                     })
                 .collect::<HashMap<SocketAddr, &mut Listener>>();
 
             for (_, frontend) in frontends {

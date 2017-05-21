@@ -12,7 +12,7 @@ use driver_state::DriverState;
 pub struct Driver {
     to_reregister: HashSet<IncomingToken>,
     incoming_connections: Slab<Connection, IncomingToken>,
-    outgoing_connections: Slab<Option<IncomingToken>, OutgoingToken>,
+    outgoing_connections_token: Slab<Option<IncomingToken>, OutgoingToken>,
     state: DriverState,
 }
 
@@ -27,8 +27,8 @@ impl Driver {
             to_reregister: HashSet::new(),
             incoming_connections: Slab::new_starting_at(IncomingToken(1),
                                                         state.config.buffers.connections),
-            outgoing_connections: Slab::new_starting_at(OutgoingToken(1),
-                                                        state.config.buffers.connections),
+            outgoing_connections_token: Slab::new_starting_at(OutgoingToken(1),
+                                                              state.config.buffers.connections),
             state: state,
         }
     }
@@ -58,7 +58,7 @@ impl Driver {
                 }
             };
 
-            let outgoing_token = self.outgoing_connections
+            let outgoing_token = self.outgoing_connections_token
                 .insert(None)
                 .expect("Outgoing buffer full");
 
@@ -67,24 +67,26 @@ impl Driver {
                 .map_err(|_| "Incoming buffer full")
                 .unwrap();
 
-            self.outgoing_connections[outgoing_token] = Some(incoming_token);
+            self.outgoing_connections_token[outgoing_token] = Some(incoming_token);
 
             let connection = self.incoming_connections.get(incoming_token).unwrap();
 
+            info!("IncomingToken {:?}", incoming_token.as_raw_token());
+            info!("OutgoingToken {:?}", outgoing_token.as_raw_token());
             poll.register(connection.incoming_stream(),
                           incoming_token.as_raw_token(),
-                          Ready::readable() | Ready::readable(),
+                          Ready::readable() | Ready::writable(),
                           PollOpt::edge() | PollOpt::oneshot())
                 .unwrap();
             poll.register(connection.outgoing_stream(),
                           outgoing_token.as_raw_token(),
-                          Ready::readable(),
+                          Ready::readable() | Ready::writable(),
                           PollOpt::edge() | PollOpt::oneshot())
                 .unwrap();
 
             poll.reregister(&listener.listener,
                             token.as_raw_token(),
-                            Ready::readable(),
+                            Ready::readable() | Ready::writable(),
                             PollOpt::edge() | PollOpt::oneshot())
                 .unwrap();
         } else {
@@ -96,12 +98,12 @@ impl Driver {
         let mut remove = false;
 
         if let Some(mut connection) = self.incoming_connections.get_mut(token) {
+            info!("in incoming ready {:?} {:?}", token, ready.is_readable());
             connection.incoming_ready(ready);
             let data_sent = connection.tick();
-
             if !data_sent && (connection.is_incoming_closed() || connection.is_outgoing_closed()) {
                 remove = true;
-            } else {
+            } else if data_sent || ready.is_readable() {
                 self.to_reregister.insert(token);
             }
         } else {
@@ -113,17 +115,18 @@ impl Driver {
         }
     }
 
-    fn outgoing_ready(&mut self, token: OutgoingToken, events: Ready) {
-        if let Some(&Some(incoming_token)) = self.outgoing_connections.get(token) {
+    fn outgoing_ready(&mut self, token: OutgoingToken, ready: Ready) {
+        if let Some(&Some(incoming_token)) = self.outgoing_connections_token.get(token) {
             let mut remove = false;
 
             if let Some(mut connection) = self.incoming_connections.get_mut(incoming_token) {
-                connection.outgoing_ready(events);
+                connection.outgoing_ready(ready);
                 let data_sent = connection.tick();
 
                 if !data_sent && connection.is_outgoing_closed() {
                     remove = true;
-                } else {
+                } else if data_sent {
+                    //info!("to_reregister token {:?} from outgoing_ready", token);
                     self.to_reregister.insert(incoming_token);
                 }
             } else {
@@ -136,7 +139,7 @@ impl Driver {
                 debug!("Clearing connection from {:?} -> {:?}",
                        token,
                        incoming_token);
-                self.outgoing_connections[token] = None
+                self.outgoing_connections_token[token] = None
             }
         } else {
             warn!("Could not find outgoing connection for {:?}", token);
@@ -148,7 +151,7 @@ impl Driver {
         let connection = self.incoming_connections
             .remove(token)
             .expect("Can't remove already removed incoming connection");
-        self.outgoing_connections
+        self.outgoing_connections_token
             .remove(connection.outgoing_token())
             .expect("Can't remove already removed outgoing connection");
     }
@@ -192,6 +195,7 @@ impl Driver {
             for event in events.iter() {
                 match TokenType::from_raw_token(event.token()) {
                     TokenType::Listener(token) => {
+                        println!("listener token");
                         self.listener_ready(poll, token, event.readiness())
                     }
                     TokenType::Incoming(token) => self.incoming_ready(token, event.readiness()),

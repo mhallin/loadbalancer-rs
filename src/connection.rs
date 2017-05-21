@@ -24,19 +24,73 @@ pub struct OutgoingToken(pub usize);
 
 type BufferArray = [u8; 4096];
 
-pub struct Connection {
-    incoming_state: Ready,
-    incoming_stream: TcpStream,
-    incoming_buffer: BufferArray,
-    incoming_buffer_size: usize,
-    incoming_total_transfer: usize,
+#[derive(Copy, Clone)]
+pub enum EndPointType {
+    Front = 0,
+    Back = 1,
+}
 
-    outgoing_state: Ready,
-    outgoing_stream: TcpStream,
-    outgoing_token: OutgoingToken,
-    outgoing_buffer: BufferArray,
-    outgoing_buffer_size: usize,
-    outgoing_total_transfer: usize,
+pub struct EndPoint {
+    state: Ready,
+    stream: TcpStream,
+    buffer: BufferArray,
+    buffer_index: usize,
+}
+
+impl EndPoint {
+    pub fn new(tcpStream: TcpStream) -> EndPoint {
+        EndPoint {
+            state: Ready::empty(),
+            stream: tcpStream,
+            buffer: [0; 4096],
+            buffer_index: 0,
+        }
+    }
+
+    pub fn absorb(buf: &mut BufferArray, index: &mut usize, src: &mut TcpStream) -> usize {
+        match src.read(buf.split_at_mut(*index).1) {
+            Ok(n_read) => {
+                info!("### Read {} bytes", n_read);
+                *index += n_read;
+                return n_read;
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::WouldBlock {
+                    //                    info!("WouldBlock when read");
+                    return 0;
+                }
+                error!("Reading caused error: {}", e);
+            }
+        }
+        return 0;
+    }
+
+    pub fn pipe(buf: &mut BufferArray, size: usize, dest: &mut TcpStream) -> usize {
+        info!("in pipe size is {}", size);
+        match dest.write(buf.split_at(size).0) {
+            Ok(n_written) => {
+                info!("### Write {} bytes", n_written);
+                if n_written < size {
+                    error!("do not support shorten writeen");
+                }
+                return n_written;
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::WouldBlock {
+                    // info!("WouldBlock when read");
+                    return 0;
+                }
+
+                error!("Reading caused error: {}", e);
+                return 0;
+            }
+        }
+    }
+}
+
+pub struct Connection {
+    points: [EndPoint; 2],
+    backend_token: OutgoingToken,
 }
 
 impl Connection {
@@ -45,135 +99,117 @@ impl Connection {
                outgoing_token: OutgoingToken)
                -> Connection {
         Connection {
-            incoming_state: Ready::empty(),
-            incoming_stream: incoming_stream,
-            incoming_buffer: [0; 4096],
-            incoming_buffer_size: 4096,
-            incoming_total_transfer: 0,
-
-            outgoing_state: Ready::empty(),
-            outgoing_stream: outgoing_stream,
-            outgoing_token: outgoing_token,
-            outgoing_buffer: [0; 4096],
-            outgoing_buffer_size: 4096,
-            outgoing_total_transfer: 0,
+            points: [EndPoint::new(incoming_stream),
+                     EndPoint::new(outgoing_stream)],
+            backend_token: outgoing_token,
         }
     }
 
     pub fn incoming_ready(&mut self, events: Ready) {
-        self.incoming_state.insert(events);
+        self.points[EndPointType::Front as usize]
+            .state
+            .insert(events);
     }
 
     pub fn outgoing_ready(&mut self, events: Ready) {
-        self.outgoing_state.insert(events);
+        self.points[EndPointType::Back as usize]
+            .state
+            .insert(events);
     }
 
     pub fn is_outgoing_closed(&self) -> bool {
-        let unix_ready = UnixReady::from(self.outgoing_state);
+        let unix_ready = UnixReady::from(self.points[EndPointType::Back as usize].state);
 
         unix_ready.is_error() || unix_ready.is_hup()
     }
 
     pub fn is_incoming_closed(&self) -> bool {
-        let unix_ready = UnixReady::from(self.incoming_state);
+        let unix_ready = UnixReady::from(self.points[EndPointType::Front as usize].state);
 
         unix_ready.is_error() || unix_ready.is_hup()
     }
 
     pub fn incoming_stream<'a>(&'a self) -> &'a TcpStream {
-        &self.incoming_stream
+        &self.points[EndPointType::Front as usize].stream
     }
 
     pub fn outgoing_stream<'a>(&'a self) -> &'a TcpStream {
-        &self.outgoing_stream
+        &self.points[EndPointType::Back as usize].stream
     }
 
     pub fn outgoing_token(&self) -> OutgoingToken {
-        self.outgoing_token
+        self.backend_token
     }
 
     pub fn tick(&mut self) -> bool {
-        trace!("Connection in state [incoming {:?}] [outgoing {:?}]",
-               self.incoming_state,
-               self.outgoing_state);
+        //        trace!("Connection in state [incoming {:?}] [outgoing {:?}]",
+        //               self.incoming_state,
+        //               self.outgoing_state);
 
-        let mut data_sent = false;
-        let mut could_send = false;
-
-        if self.incoming_buffer.len() != self.incoming_buffer_size &&
-           self.outgoing_state.is_writable() {
-            could_send = true;
-            data_sent |= flush_buffer(&mut self.incoming_buffer,
-                                      &mut self.incoming_buffer_size,
-                                      &mut self.outgoing_stream,
-                                      &mut self.outgoing_total_transfer);
-            self.outgoing_state.remove(Ready::writable());
+        let mut sended = false;
+        for point in self.points.iter_mut() {
+            if point.state.is_readable() {
+                info!("point state is readable");
+                EndPoint::absorb(&mut point.buffer,
+                                 &mut point.buffer_index,
+                                 &mut point.stream);
+                point.state.remove(Ready::readable());
+            }
         }
 
-        if self.outgoing_buffer.len() != self.outgoing_buffer_size &&
-           self.incoming_state.is_writable() {
-            could_send = true;
-            data_sent |= flush_buffer(&mut self.outgoing_buffer,
-                                      &mut self.outgoing_buffer_size,
-                                      &mut self.incoming_stream,
-                                      &mut self.incoming_total_transfer);
-            self.incoming_state.remove(Ready::writable());
+        if self.points[EndPointType::Front as usize].buffer_index > 0 &&
+           self.points[EndPointType::Back as usize]
+               .state
+               .is_writable() {
+            EndPoint::pipe(&mut self.points[EndPointType::Front as usize].buffer,
+                           self.points[EndPointType::Front as usize].buffer_index,
+                           &mut self.points[EndPointType::Back as usize].stream);
+            self.points[EndPointType::Front as usize].buffer_index = 0;
+            sended = true;
         }
 
-        if self.outgoing_state.is_writable() && self.incoming_state.is_readable() {
-            could_send = true;
-            data_sent |= transfer(&mut self.incoming_buffer,
-                                  &mut self.incoming_buffer_size,
-                                  &mut self.incoming_stream,
-                                  &mut self.outgoing_stream,
-                                  &mut self.outgoing_total_transfer);
-            self.incoming_state.remove(Ready::readable());
-            self.outgoing_state.remove(Ready::writable());
+        if self.points[EndPointType::Back as usize].buffer_index > 0 &&
+           self.points[EndPointType::Front as usize]
+               .state
+               .is_writable() {
+            EndPoint::pipe(&mut self.points[EndPointType::Back as usize].buffer,
+                           self.points[EndPointType::Back as usize].buffer_index,
+                           &mut self.points[EndPointType::Front as usize].stream);
+            self.points[EndPointType::Back as usize].buffer_index = 0;
+            sended = true;
         }
-
-        if self.incoming_state.is_writable() && self.outgoing_state.is_readable() {
-            could_send = true;
-            data_sent |= transfer(&mut self.outgoing_buffer,
-                                  &mut self.outgoing_buffer_size,
-                                  &mut self.outgoing_stream,
-                                  &mut self.incoming_stream,
-                                  &mut self.incoming_total_transfer);
-            self.incoming_state.remove(Ready::writable());
-            self.outgoing_state.remove(Ready::readable());
-        }
-
-        !could_send || data_sent
+        return sended;
     }
 }
 
-fn flush_buffer(buf: &BufferArray,
-                buf_size: &mut usize,
-                dest: &mut TcpStream,
-                total: &mut usize)
-                -> bool {
-    let start_index = *buf_size;
-    let bytes_to_write = buf.len() - start_index;
-
-    trace!("Will flush {} bytes", bytes_to_write);
-
-    match dest.write(&buf[start_index..]) {
-        Ok(n_written) => {
-            *total += n_written;
-            trace!("Flushed {} bytes, total {}", n_written, *total);
-
-            assert!(bytes_to_write == n_written, "Must flush entire buffer");
-
-            *buf_size = buf.len();
-
-            return n_written > 0;
-        }
-        Err(e) => {
-            error!("Writing caused error: {}", e);
-        }
-    }
-
-    return false;
-}
+// fn flush_buffer(buf: &BufferArray,
+//                 buf_size: &mut usize,
+//                 dest: &mut TcpStream,
+//                 total: &mut usize)
+//                 -> bool {
+//     let start_index = *buf_size;
+//     let bytes_to_write = buf.len() - start_index;
+//
+//     trace!("Will flush {} bytes", bytes_to_write);
+//
+//     match dest.write(&buf[start_index..]) {
+//         Ok(n_written) => {
+//             *total += n_written;
+//             trace!("Flushed {} bytes, total {}", n_written, *total);
+//
+//             assert!(bytes_to_write == n_written, "Must flush entire buffer");
+//
+//             *buf_size = buf.len();
+//
+//             return n_written > 0;
+//         }
+//         Err(e) => {
+//             error!("Writing caused error: {}", e);
+//         }
+//     }
+//
+//     return false;
+// }
 
 fn transfer(buf: &mut BufferArray,
             buf_size: &mut usize,
@@ -183,12 +219,12 @@ fn transfer(buf: &mut BufferArray,
             -> bool {
     match src.read(buf) {
         Ok(n_read) => {
-            trace!("Read {} bytes", n_read);
+            info!("### Read {} bytes", n_read);
 
             match dest.write(&buf[0..n_read]) {
                 Ok(n_written) => {
                     *total += n_written;
-                    trace!("Wrote {} bytes, total {}", n_written, *total);
+                    info!("Wrote {} bytes, total {}", n_written, *total);
 
                     if n_written < n_read {
                         *buf_size = buf.len() - (n_read - n_written);
@@ -200,7 +236,7 @@ fn transfer(buf: &mut BufferArray,
                 }
                 Err(e) => {
                     if e.kind() == ErrorKind::WouldBlock {
-                        trace!("WouldBlock when write");
+                        // info!("WouldBlock when write");
                         return false;
                     }
                     error!("Writing caused error: {}", e);
@@ -209,7 +245,7 @@ fn transfer(buf: &mut BufferArray,
         }
         Err(e) => {
             if e.kind() == ErrorKind::WouldBlock {
-                trace!("WouldBlock when read");
+                // info!("WouldBlock when read");
                 return false;
             }
 
