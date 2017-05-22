@@ -12,9 +12,9 @@ pub struct Frontend {
 impl Frontend {
     pub fn new(listen_addr: SocketAddr, backends: Vec<Rc<RefCell<Backend>>>) -> Rc<Frontend> {
         Rc::new(Frontend {
-            listen_addr: listen_addr,
-            backends: backends,
-        })
+                    listen_addr: listen_addr,
+                    backends: backends,
+                })
     }
 
     pub fn listen_addrs(&self) -> Vec<SocketAddr> {
