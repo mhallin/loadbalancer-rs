@@ -38,10 +38,10 @@ pub struct EndPoint {
 }
 
 impl EndPoint {
-    pub fn new(tcpStream: TcpStream) -> EndPoint {
+    pub fn new(tcp_stream: TcpStream) -> EndPoint {
         EndPoint {
             state: Ready::empty(),
-            stream: tcpStream,
+            stream: tcp_stream,
             buffer: [0; 4096],
             buffer_index: 0,
         }
@@ -141,6 +141,17 @@ impl Connection {
         self.backend_token
     }
 
+    pub fn transfer(&mut self, src: EndPointType, dest: EndPointType) -> usize {
+        let mut count = 0;
+        if self.points[src as usize].buffer_index > 0 &&
+           self.points[dest as usize].state.is_writable() {
+            count = EndPoint::pipe(&mut self.points[src as usize].buffer,
+                                   self.points[src as usize].buffer_index,
+                                   &mut self.points[dest as usize].stream);
+            self.points[src as usize].buffer_index = 0;
+        }
+        count
+    }
     pub fn tick(&mut self) -> bool {
         //        trace!("Connection in state [incoming {:?}] [outgoing {:?}]",
         //               self.incoming_state,
@@ -157,103 +168,10 @@ impl Connection {
             }
         }
 
-        if self.points[EndPointType::Front as usize].buffer_index > 0 &&
-           self.points[EndPointType::Back as usize]
-               .state
-               .is_writable() {
-            EndPoint::pipe(&mut self.points[EndPointType::Front as usize].buffer,
-                           self.points[EndPointType::Front as usize].buffer_index,
-                           &mut self.points[EndPointType::Back as usize].stream);
-            self.points[EndPointType::Front as usize].buffer_index = 0;
-            sended = true;
-        }
-
-        if self.points[EndPointType::Back as usize].buffer_index > 0 &&
-           self.points[EndPointType::Front as usize]
-               .state
-               .is_writable() {
-            EndPoint::pipe(&mut self.points[EndPointType::Back as usize].buffer,
-                           self.points[EndPointType::Back as usize].buffer_index,
-                           &mut self.points[EndPointType::Front as usize].stream);
-            self.points[EndPointType::Back as usize].buffer_index = 0;
-            sended = true;
-        }
-        return sended;
+        sended |= self.transfer(EndPointType::Back, EndPointType::Front) > 0;
+        sended |= self.transfer(EndPointType::Front, EndPointType::Back) > 0;
+        sended
     }
-}
-
-// fn flush_buffer(buf: &BufferArray,
-//                 buf_size: &mut usize,
-//                 dest: &mut TcpStream,
-//                 total: &mut usize)
-//                 -> bool {
-//     let start_index = *buf_size;
-//     let bytes_to_write = buf.len() - start_index;
-//
-//     trace!("Will flush {} bytes", bytes_to_write);
-//
-//     match dest.write(&buf[start_index..]) {
-//         Ok(n_written) => {
-//             *total += n_written;
-//             trace!("Flushed {} bytes, total {}", n_written, *total);
-//
-//             assert!(bytes_to_write == n_written, "Must flush entire buffer");
-//
-//             *buf_size = buf.len();
-//
-//             return n_written > 0;
-//         }
-//         Err(e) => {
-//             error!("Writing caused error: {}", e);
-//         }
-//     }
-//
-//     return false;
-// }
-
-fn transfer(buf: &mut BufferArray,
-            buf_size: &mut usize,
-            src: &mut TcpStream,
-            dest: &mut TcpStream,
-            total: &mut usize)
-            -> bool {
-    match src.read(buf) {
-        Ok(n_read) => {
-            info!("### Read {} bytes", n_read);
-
-            match dest.write(&buf[0..n_read]) {
-                Ok(n_written) => {
-                    *total += n_written;
-                    info!("Wrote {} bytes, total {}", n_written, *total);
-
-                    if n_written < n_read {
-                        *buf_size = buf.len() - (n_read - n_written);
-                    } else {
-                        *buf_size = buf.len();
-                    }
-
-                    return n_written > 0;
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                        // info!("WouldBlock when write");
-                        return false;
-                    }
-                    error!("Writing caused error: {}", e);
-                }
-            }
-        }
-        Err(e) => {
-            if e.kind() == ErrorKind::WouldBlock {
-                // info!("WouldBlock when read");
-                return false;
-            }
-
-            error!("Reading caused error: {}", e);
-        }
-    }
-
-    return false;
 }
 
 impl TokenType {
@@ -268,7 +186,6 @@ impl TokenType {
         }
     }
 }
-
 
 impl ListenerToken {
     pub fn as_raw_token(self) -> Token {
